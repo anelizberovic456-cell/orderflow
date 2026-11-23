@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Order Flow</title>
+<style>
+:root{--bg:#0d1520;--pan:#142030;--ln:#25364a;--tx:#e6edf5;--mu:#8296ab;--up:#34c9a3;--dn:#f06c5c;--am:#f2b84b;--upbg:rgba(52,201,163,.30);--dnbg:rgba(240,108,92,.30)}
+@media(prefers-color-scheme:light){:root{--bg:#eef2f6;--pan:#fff;--ln:#d3dce6;--tx:#14202e;--mu:#586b80;--up:#0f8f6f;--dn:#c2392b;--am:#b7791f;--upbg:rgba(15,143,111,.24);--dnbg:rgba(194,57,43,.22)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.num{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-variant-numeric:tabular-nums}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--ln)}
+h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+.pill{padding:2px 10px;border-radius:99px;border:1px solid var(--ln);color:var(--mu);font-size:12px}
+.pill.ok{color:var(--up);border-color:var(--up)}.pill.bad{color:var(--dn);border-color:var(--dn)}
+.ctl{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}
+label{display:flex;flex-direction:column;font-size:11px;color:var(--mu);gap:2px}
+select,input,button{background:var(--pan);color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:6px 8px;font:inherit;font-size:13px}
+input{width:76px}
+button{cursor:pointer}button:hover{border-color:var(--am)}
+:focus-visible{outline:2px solid var(--am);outline-offset:1px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;background:var(--ln);border-bottom:1px solid var(--ln)}
+.st{background:var(--bg);padding:10px 16px}
+.st span{display:block;font-size:11px;color:var(--mu)}
+.st b{font-size:19px;font-weight:600}
+main{display:grid;grid-template-columns:1fr 340px;gap:0}
+.chart{padding:12px 12px 4px;min-width:0}
+canvas{width:100%;height:440px;display:block;background:var(--pan);border:1px solid var(--ln);border-radius:8px}
+.leg{font-size:12px;color:var(--mu);padding:8px 2px}
+aside{border-left:1px solid var(--ln);padding:12px 16px;max-height:560px;overflow:auto}
+aside h2{font-size:14px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
+.sg{border-left:3px solid var(--mu);padding:6px 10px;margin:0 0 8px;background:var(--pan);border-radius:0 6px 6px 0}
+.sg.up{border-color:var(--up)}.sg.dn{border-color:var(--dn)}
+.sg small{display:block;color:var(--mu)}
+.empty{color:var(--mu)}
+footer{padding:12px 16px;color:var(--mu);font-size:12px;border-top:1px solid var(--ln)}
+@media(max-width:860px){main{grid-template-columns:1fr}aside{border-left:0;border-top:1px solid var(--ln);max-height:none}canvas{height:380px}.ctl{margin-left:0}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Order Flow</h1><span id="pill" class="pill">nije povezano</span>
+  <div class="ctl">
+    <label>Simbol<select id="sym"><option>BTCUSDT</option><option>ETHUSDT</option></select></label>
+    <label>Tržište<select id="mkt"><option value="futures">Perpetuali</option><option value="spot">Spot</option></select></label>
+    <label>Svijeća<select id="tf"><option value="60">1 min</option><option value="300">5 min</option></select></label>
+    <label>Nivo (tick)<input id="tick" type="number" step="any" value="10"></label>
+    <label>Imbalance x<input id="ratio" type="number" step="0.5" value="3"></label>
+    <label>Min. vol<input id="minv" type="number" step="any" value="0.3"></label>
+    <label>&nbsp;<button id="go">Primijeni</button></label>
+  </div>
+</header>
+<section class="stats num">
+  <div class="st"><span>Cijena</span><b id="sP">–</b></div>
+  <div class="st"><span>Delta (tekuća svijeća)</span><b id="sD">–</b></div>
+  <div class="st"><span>CVD (od starta)</span><b id="sC">–</b></div>
+  <div class="st"><span>Jučer high</span><b id="sH">–</b></div>
+  <div class="st"><span>Jučer low</span><b id="sL">–</b></div>
+</section>
+<main>
+  <div class="chart">
+    <canvas id="cv"></canvas>
+    <div class="leg">Lijevo u ćeliji: prodaja po bidu. Desno: kupovina po asku. Zelena/crvena pozadina: imbalance. Okvir: POC. Tačka iznad svijeće: signal.</div>
+  </div>
+  <aside>
+    <h2>Signali <button id="exp">Izvezi CSV</button></h2>
+    <div id="sigs"><p class="empty">Čekam prvih ~10 svijeća. Signali su mjesta za pregled, ne naloge za ulaz.</p></div>
+  </aside>
+</main>
+<footer>Podaci dolaze direktno iz tvog browsera sa Binance-a. Alat za posmatranje i paper trejding, nije finansijski savjet.</footer>
+
+<script>
+const $=id=>document.getElementById(id);
+const S={sym:'BTCUSDT',mkt:'futures',tf:60,tick:10,ratio:3,minv:0.3,stack:3};
+let ws,gen=0,candle=null,hist=[],cvd=0,skipped=false,curDay=null,pdh=null,pdl=null,sigs=[],dirty=true,last=null;
+
+const fmt=(v,d=1)=>v.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn=v=>(v>=0?'+':'')+fmt(v,2);
+const hm=t=>new Date(t*1000).toLocaleTimeString('sr-RS',{hour:'2-digit',minute:'2-digit'});
+
+function setPill(t,c){const p=$('pill');p.textContent=t;p.className='pill '+(c||'')}
+function reset(){candle=null;hist=[];cvd=0;skipped=false;curDay=null;pdh=pdl=null;sigs=[];last=null;renderSigs();dirty=true}
+function wsUrl(){return S.mkt==='futures'?`wss://fstream.binance.com/ws/${S.sym.toLowerCase()}@aggTrade`:`wss://stream.binance.com:9443/ws/${S.sym.toLowerCase()}@aggTrade`}
+function open(){
+  const g=gen;setPill('povezivanje…');
+  ws=new WebSocket(wsUrl());
+  ws.onopen=()=>setPill('uživo','ok');
+  ws.onmessage=e=>onTrade(JSON.parse(e.data));
+  ws.onerror=()=>{try{ws.close()}catch(e){}};
+  ws.onclose=()=>{if(g!==gen)return;setPill('veza pukla, ponovo za 3 s','bad');setTimeout(()=>{if(g===gen)open()},3000)};
+}
+function connect(){gen++;try{if(ws){ws.onclose=null;ws.close()}}catch(e){}reset();open()}
+
+async function fetchPrev(){
+  try{
+    const base=S.mkt==='futures'?'https://fapi.binance.com/fapi/v1':'https://api.binance.com/api/v3';
+    const d=await (await fetch(`${base}/klines?symbol=${S.sym}&interval=1d&limit=2`)).json();
+    pdh=+d[0][2];pdl=+d[0][3];
+  }catch(e){pdh=pdl=null}
+  dirty=true;
+}
+
+function newC(st,p){return{st,o:p,h:p,l:p,c:p,lv:new Map(),bid:0,ask:0}}
+function onTrade(d){
+  const t=d.T/1000,p=+d.p,q=+d.q,sell=d.m,st=Math.floor(t/S.tf)*S.tf,day=Math.floor(t/86400);
+  if(day!==curDay){curDay=day;fetchPrev()}
+  if(!candle)candle=newC(st,p);
+  else if(st>candle.st){closeC(candle);candle=newC(st,p)}
+  const c=candle,i=Math.floor(p/S.tick);
+  c.h=Math.max(c.h,p);c.l=Math.min(c.l,p);c.c=p;last=p;
+  if(!c.lv.has(i))c.lv.set(i,[0,0]);
+  if(sell){c.lv.get(i)[0]+=q;c.bid+=q}else{c.lv.get(i)[1]+=q;c.ask+=q}
+  dirty=true;
+}
+
+function imb(c){
+  const B=new Set(),Sl=new Set(),L=c.lv;
+  L.forEach(([bid,ask],i)=>{
+    const lb=L.has(i-1)?L.get(i-1)[0]:0,la=L.has(i+1)?L.get(i+1)[1]:0;
+    if(ask>=S.minv&&ask>=S.ratio*Math.max(lb,1e-9))B.add(i);
+    if(bid>=S.minv&&bid>=S.ratio*Math.max(la,1e-9))Sl.add(i);
+  });
+  return[B,Sl];
+}
+function runs(set,n){
+  const r=[];[...set].sort((a,b)=>a-b).forEach(i=>{const l=r[r.length-1];if(l&&i===l[l.length-1]+1)l.push(i);else r.push([i])});
+  return r.filter(x=>x.length>=n);
+}
+function poc(c){let b=null,m=-1;c.lv.forEach(([x,y],i)=>{if(x+y>m){m=x+y;b=i}});return b}
+function tags(c){
+  const t=[];
+  if(pdh&&Math.abs(c.h-pdh)/pdh*100<=0.15)t.push('PDH');
+  if(pdl&&Math.abs(c.l-pdl)/pdl*100<=0.15)t.push('PDL');
+  return t.length?` [na nivou: ${t.join(', ')}]`:'';
+}
+function analyze(c,B,Sl){
+  const o=[],T=S.tick,h=hist.filter(x=>!x.partial);
+  runs(B,S.stack).forEach(r=>o.push({bias:'up',msg:`Stacked BUY imbalance (${r.length} nivoa, ${r[0]*T}–${r[r.length-1]*T}). Inicijativa kupaca, čekaj povlačenje.`}));
+  runs(Sl,S.stack).forEach(r=>o.push({bias:'dn',msg:`Stacked SELL imbalance (${r.length} nivoa, ${r[0]*T}–${r[r.length-1]*T}). Inicijativa prodavaca, čekaj povlačenje.`}));
+  if(h.length<10)return o;
+  const ref=h.slice(-20),avg=f=>ref.reduce((a,x)=>a+f(x),0)/ref.length;
+  const aD=avg(x=>Math.abs(x.d)),aR=avg(x=>x.h-x.l),aV=avg(x=>x.v),rng=c.h-c.l,tt=tags(c);
+  if(aD>0&&rng<=1.2*aR){
+    if(c.d<=-2*aD&&c.c>=c.o)o.push({bias:'up',msg:`Apsorpcija (long bias): jaka prodaja ${sgn(c.d)}, cijena izdržala.${tt}`});
+    if(c.d>=2*aD&&c.c<=c.o)o.push({bias:'dn',msg:`Apsorpcija (short bias): jaka kupovina ${sgn(c.d)}, cijena izdržala.${tt}`});
+  }
+  const w=h.slice(-10),nh=c.h>Math.max(...w.map(x=>x.h)),nl=c.l<Math.min(...w.map(x=>x.l));
+  if(nh&&(c.d<=0||c.v<0.7*aV))o.push({bias:'dn',msg:`Iscrpljenost (short bias): novi high, delta ${sgn(c.d)}, volumen slab.${tt}`});
+  if(nl&&(c.d>=0||c.v<0.7*aV))o.push({bias:'up',msg:`Iscrpljenost (long bias): novi low, delta ${sgn(c.d)}, volumen slab.${tt}`});
+  if(nh&&c.cvd<Math.max(...w.map(x=>x.cvd)))o.push({bias:'dn',msg:`CVD divergencija (bearish): novi high, CVD nije.${tt}`});
+  if(nl&&c.cvd>Math.min(...w.map(x=>x.cvd)))o.push({bias:'up',msg:`CVD divergencija (bullish): novi low, CVD nije.${tt}`});
+  return o;
+}
+function closeC(c){
+  c.d=c.ask-c.bid;c.v=c.ask+c.bid;
+  if(!skipped){skipped=true;c.partial=true;c.cvd=0;hist.push(c);return}
+  cvd+=c.d;c.cvd=cvd;
+  const [B,Sl]=imb(c);
+  analyze(c,B,Sl).forEach(x=>sigs.unshift({st:c.st,p:c.c,...x}));
+  if(sigs.length>100)sigs.length=100;
+  hist.push(c);if(hist.length>300)hist.shift();
+  renderSigs();
+}
+
+function renderSigs(){
+  const el=$('sigs');
+  if(!sigs.length){el.innerHTML='<p class="empty">Čekam prvih ~10 svijeća. Signali su mjesta za pregled, ne naloge za ulaz.</p>';return}
+  el.innerHTML=sigs.map(s=>`<div class="sg ${s.bias}"><small class="num">${hm(s.st)} · cijena ${fmt(s.p,1)}</small>${s.msg}</div>`).join('');
+}
+
+function stats(){
+  const c=candle;
+  $('sP').textContent=last?fmt(last,1):'–';
+  $('sD').textContent=c?sgn(c.ask-c.bid):'–';
+  $('sD').style.color=c?((c.ask-c.bid)>=0?'var(--up)':'var(--dn)'):'';
+  $('sC').textContent=sgn(cvd+(c?c.ask-c.bid:0));
+  $('sH').textContent=pdh?fmt(pdh,1):'n/d';
+  $('sL').textContent=pdl?fmt(pdl,1):'n/d';
+}
+
+function draw(){
+  const cv=$('cv'),r=cv.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+  if(cv.width!==Math.round(r.width*dpr)||cv.height!==Math.round(r.height*dpr)){cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr)}
+  const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);
+  const cs=getComputedStyle(document.documentElement),C=n=>cs.getPropertyValue(n).trim();
+  const W=r.width,H=r.height;x.clearRect(0,0,W,H);
+  const all=candle?[...hist,candle]:hist.slice();
+  x.textBaseline='middle';
+  if(!all.length){x.fillStyle=C('--mu');x.font='14px system-ui';x.fillText('Čekam transakcije…',16,30);return}
+  const axW=64,colW=W<600?78:100,botH=58,n=Math.max(1,Math.floor((W-axW-8)/colW)),vis=all.slice(-n);
+  let hi=-Infinity,lo=Infinity;vis.forEach(c=>{hi=Math.max(hi,c.h);lo=Math.min(lo,c.l)});
+  const i0=Math.floor(lo/S.tick),i1=Math.floor(hi/S.tick),rows=i1-i0+1,top=10,ch=H-botH-top-6;
+  const rh=Math.min(24,ch/rows),off=top+(ch-rh*rows)/2,Y=i=>off+(i1-i)*rh,PY=p=>off+(i1+1-p/S.tick)*rh;
+  // osa cijena
+  x.font='11px ui-monospace,Consolas,monospace';x.strokeStyle=C('--ln');x.lineWidth=1;
+  const step=Math.max(1,Math.ceil(rows/8));
+  for(let i=i0;i<=i1;i+=step){const y=Y(i)+rh/2;x.fillStyle=C('--mu');x.textAlign='right';x.fillText(fmt(i*S.tick,S.tick<1?1:0),axW-6,y);x.beginPath();x.moveTo(axW,y);x.lineTo(W,y);x.globalAlpha=.35;x.stroke();x.globalAlpha=1}
+  // signali po svijeci
+  const sm={};sigs.forEach(s=>{(sm[s.st]=sm[s.st]||[]).push(s.bias)});
+  vis.forEach((c,k)=>{
+    const x0=axW+k*colW,cw=colW-6,half=(cw-8)/2,[B,Sl]=imb(c),pc=poc(c);
+    // tijelo/fitilj
+    const up=c.c>=c.o;x.fillStyle=up?C('--up'):C('--dn');
+    x.fillRect(x0+1,PY(c.h),1.5,Math.max(1,PY(c.l)-PY(c.h)));
+    const yo=PY(c.o),yc=PY(c.c);x.fillRect(x0-1,Math.min(yo,yc),5.5,Math.max(2,Math.abs(yo-yc)));
+    // ćelije
+    const showTx=rh>=10;x.font=`${Math.min(11,Math.floor(rh-1))}px ui-monospace,Consolas,monospace`;
+    c.lv.forEach(([bid,ask],i)=>{
+      const y=Y(i),bx=x0+8;
+      if(Sl.has(i)){x.fillStyle=C('--dnbg');x.fillRect(bx,y,half,rh-1)}
+      if(B.has(i)){x.fillStyle=C('--upbg');x.fillRect(bx+half,y,half,rh-1)}
+      if(showTx){
+        x.fillStyle=Sl.has(i)?C('--dn'):C('--tx');x.textAlign='right';x.fillText(fmt(bid,bid<10?1:0),bx+half-3,y+rh/2);
+        x.fillStyle=B.has(i)?C('--up'):C('--tx');x.textAlign='left';x.fillText(fmt(ask,ask<10?1:0),bx+half+3,y+rh/2);
+      }
+      if(i===pc){x.strokeStyle=C('--am');x.lineWidth=1.5;x.strokeRect(bx+.5,y+.5,cw-9,rh-2)}
+    });
+    // signal tačka
+    if(sm[c.st]){const b=sm[c.st][0];x.fillStyle=b==='up'?C('--up'):C('--dn');x.beginPath();x.arc(x0+cw-4,PY(c.h)-6,4,0,6.3);x.fill()}
+    // delta
+    const d=c.ask-c.bid;x.font='11px ui-monospace,Consolas,monospace';x.textAlign='center';
+    x.fillStyle=d>=0?C('--up'):C('--dn');x.fillText(sgn(d),x0+colW/2-3,H-botH+10);
+    x.fillStyle=C('--mu');x.fillText(hm(c.st),x0+colW/2-3,H-botH+24);
+  });
+  // CVD linija
+  const cv_=vis.map(c=>c.partial?null:(c.cvd!==undefined&&c===candle?cvd+(c.ask-c.bid):c.cvd));
+  const vals=cv_.filter(v=>v!==null);
+  if(vals.length>1){
+    const mn=Math.min(...vals),mx=Math.max(...vals),a=H-botH+34,b=H-6;
+    x.beginPath();x.strokeStyle=C('--am');x.lineWidth=1.5;let st=false;
+    cv_.forEach((v,k)=>{if(v===null)return;const px=axW+k*colW+colW/2-3,py=b-(mx===mn?.5:(v-mn)/(mx-mn))*(b-a);st?x.lineTo(px,py):x.moveTo(px,py);st=true});
+    x.stroke();x.fillStyle=C('--mu');x.textAlign='right';x.fillText('CVD',axW-6,(a+b)/2);
+  }
+  // PDH/PDL i zadnja cijena
+  const hl=(p,col,lab,dash)=>{if(p==null||p<lo-S.tick*3||p>hi+S.tick*3)return;const y=PY(p);x.setLineDash(dash);x.strokeStyle=col;x.lineWidth=1;x.beginPath();x.moveTo(axW,y);x.lineTo(W,y);x.stroke();x.setLineDash([]);x.fillStyle=col;x.textAlign='right';x.font='10px system-ui';x.fillText(lab,W-4,y-7)};
+  hl(pdh,C('--mu'),'jučer high',[2,4]);hl(pdl,C('--mu'),'jučer low',[2,4]);
+  if(last)hl(last,C('--am'),fmt(last,1),[5,3]);
+}
+
+function exportCsv(){
+  const rows=[['vrijeme','open','high','low','close','volumen','delta','cvd']];
+  hist.filter(c=>!c.partial).forEach(c=>rows.push([new Date(c.st*1000).toISOString(),c.o,c.h,c.l,c.c,c.v.toFixed(3),c.d.toFixed(3),c.cvd.toFixed(3)]));
+  rows.push([]);rows.push(['vrijeme','cijena','signal']);
+  sigs.forEach(s=>rows.push([new Date(s.st*1000).toISOString(),s.p,'"'+s.msg+'"']));
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([rows.map(r=>r.join(',')).join('\n')],{type:'text/csv'}));
+  a.download=`orderflow_${S.sym}_${Date.now()}.csv`;a.click();
+}
+
+function apply(){
+  S.sym=$('sym').value;S.mkt=$('mkt').value;S.tf=+$('tf').value;
+  S.tick=+$('tick').value||10;S.ratio=+$('ratio').value||3;S.minv=+$('minv').value||0.3;
+  connect();
+}
+$('sym').onchange=()=>{const eth=$('sym').value==='ETHUSDT';$('tick').value=eth?0.5:10;$('minv').value=eth?3:0.3};
+$('go').onclick=apply;$('exp').onclick=exportCsv;
+addEventListener('resize',()=>dirty=true);
+setInterval(()=>{if(dirty){dirty=false;draw();stats()}},250);
+apply();
+</script>
+</body>
+</html>
